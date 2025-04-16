@@ -12,6 +12,7 @@
   "action",
   "document_type",
   "custom_function_path",
+  "server_script",
   "dialog_properties_tab",
   "title",
   "description",
@@ -41,7 +42,7 @@
    "fieldname": "action",
    "fieldtype": "Select",
    "label": "Action",
-   "options": "Create Document\nCustom Function",
+   "options": "Create Document\nCustom Function\nServer Script",
    "reqd": 1
   },
   {
@@ -91,11 +92,18 @@
    "fieldname": "dialog_properties_tab",
    "fieldtype": "Tab Break",
    "label": "Dialog Properties"
+  },
+  {
+   "fieldname": "server_script",
+   "fieldtype": "Link",
+   "label": "Server Script",
+   "options": "Server Script"
   }
  ],
+ "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2024-11-14 12:08:10.691791",
+ "modified": "2025-03-10 23:03:38.680632",
  "modified_by": "Administrator",
  "module": "Raven Integrations",
  "name": "Raven Message Action",
@@ -122,8 +130,21 @@
    "report": 1,
    "role": "Raven User",
    "share": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Raven Admin",
+   "share": 1,
+   "write": 1
   }
  ],
+ "row_format": "Dynamic",
  "search_fields": "action_name",
  "show_title_field_in_link": 1,
  "sort_field": "creation",

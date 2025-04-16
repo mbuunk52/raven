@@ -4,7 +4,7 @@ import { MessageContent, MessageSenderAvatar, UserHoverCard } from "../MessageIt
 import { Box, BoxProps, ContextMenu, Flex, Text } from "@radix-ui/themes"
 import { MessageReactions } from "../MessageReactions"
 import { DateTooltip, DateTooltipShort } from "../Renderers/DateTooltip"
-import { RiShareForwardFill } from "react-icons/ri"
+import { RiPushpinFill, RiShareForwardFill } from "react-icons/ri"
 import { ReplyMessageBox } from "../ReplyMessageBox/ReplyMessageBox"
 import { useContext, useMemo, useState } from "react"
 import clsx from "clsx"
@@ -80,11 +80,25 @@ export const LeftRightLayout = ({ message, user, isActive, isHighlighted, onRepl
 
     const alignToRight = CHAT_STYLE === "Left-Right" && currentUser === userID && !is_bot_message
 
+    const [selectedText, setSelectedText] = useState('')
+
+    const onContextMenuChange = (open: boolean) => {
+        if (open) {
+            // Get the selection that te user is actually highlighting
+            const selection = document.getSelection()
+            if (selection) {
+                setSelectedText(selection.toString().trim())
+            }
+        } else {
+            setSelectedText('')
+        }
+    }
+
     return (
         <div className={clsx('flex py-0.5', alignToRight ? 'justify-end mr-4' : 'justify-start')}>
             <Flex align={'start'} gap={'2'}>
                 {!alignToRight && <MessageLeftElement message={message} user={user} isActive={isActive} className="mt-[5px]" />}
-                <ContextMenu.Root>
+                <ContextMenu.Root modal={false} onOpenChange={onContextMenuChange}>
                     <ContextMenu.Trigger
                         {...bind}
                         ref={ref}
@@ -106,7 +120,7 @@ export const LeftRightLayout = ({ message, user, isActive, isHighlighted, onRepl
                                 </Flex> : null}
 
                                 {message.is_forwarded === 1 && <Flex className='text-gray-10 text-xs' gap={'1'} align={'center'}><RiShareForwardFill size='12' /> forwarded</Flex>}
-
+                                {message.is_pinned === 1 && <Flex className='text-accent-9 text-xs' gap={'1'} align={'center'}><RiPushpinFill size='12' /> Pinned</Flex>}
                                 {linked_message && replied_message_details && <ReplyMessageBox
                                     className='sm:max-w-[32rem] max-w-[80vw] cursor-pointer mb-1'
                                     role='button'
@@ -127,7 +141,7 @@ export const LeftRightLayout = ({ message, user, isActive, isHighlighted, onRepl
 
                                 {message_reactions?.length &&
                                     <MessageReactions
-                                        messageID={name}
+                                        message={message}
                                         message_reactions={message_reactions}
                                     />
                                 }
@@ -157,6 +171,7 @@ export const LeftRightLayout = ({ message, user, isActive, isHighlighted, onRepl
                         onDelete={onDelete}
                         showThreadButton={showThreadButton}
                         onEdit={onEdit}
+                        selectedText={selectedText}
                         onReply={onReply}
                         onForward={onForward}
                         onViewReaction={onViewReaction}

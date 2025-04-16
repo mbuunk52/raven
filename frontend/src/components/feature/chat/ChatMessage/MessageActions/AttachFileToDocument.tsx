@@ -3,21 +3,20 @@ import { useCallback, useState } from 'react'
 import { Message } from '../../../../../../../types/Messaging/Message'
 import { useIsDesktop } from '@/hooks/useMediaQuery'
 import { Drawer, DrawerContent } from '@/components/layout/Drawer'
-import { DIALOG_CONTENT_CLASS } from '@/utils/layout/dialog'
-import clsx from 'clsx'
 import AttachFileToDocumentModal from '../ActionModals/AttachFileToDocumentModal'
 
 type Props = {
     file: string
 }
 
-export const useAttachFileToDocument = () => {
+export const useAttachFileToDocument = (onModalClose?: VoidFunction) => {
 
     const [message, setMessage] = useState<null | Message>(null)
 
     const onClose = useCallback(() => {
         setMessage(null)
-    }, [])
+        onModalClose?.()
+    }, [onModalClose])
 
     return {
         message,
@@ -40,7 +39,7 @@ const AttachFileToDocumentDialog = ({ message, isOpen, onClose }: AttacFileToDoc
 
     if (isDesktop) {
         return <Dialog.Root open={isOpen} onOpenChange={onClose}>
-            <Dialog.Content className={clsx(DIALOG_CONTENT_CLASS, 'static')}>
+            <Dialog.Content className={'static'}>
                 {message &&
                     <AttachFileToDocumentModal
                         message={message}

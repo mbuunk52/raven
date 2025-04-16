@@ -15,6 +15,20 @@ def get_action_defaults(action_id: str, message_id: str):
 	# Loop through the fields in the action and get the default values from the message
 	defaults = {}
 
+	channel_doc = frappe.get_doc("Raven Channel", message.channel_id)
+	workspace_id = channel_doc.workspace
+
+	if not workspace_id:
+		# Get the last workspace that this user has access to
+		workspace_id = frappe.get_last_doc("Raven Workspace", {"user_id": frappe.session.user}).name
+
+	url = frappe.utils.get_url(f"/raven/{workspace_id}")
+
+	if channel_doc.is_thread:
+		message_url = url + f"/threads/{message.channel_id}?message_id={message.name}"
+	else:
+		message_url = url + f"/{message.channel_id}?message_id={message.name}"
+
 	for field in action.fields:
 		if not field.default_value:
 			continue
@@ -23,12 +37,20 @@ def get_action_defaults(action_id: str, message_id: str):
 			defaults[field.fieldname] = field.default_value
 
 		if field.default_value_type == "Message Field":
-			val = message.get(field.default_value)
+			if field.default_value == "message_url":
+				val = message_url
+			elif field.default_value == "workspace_id":
+				val = workspace_id
+			else:
+				val = message.get(field.default_value)
 			if val:
 				defaults[field.fieldname] = val
 
 		if field.default_value_type == "Jinja":
-			val = frappe.render_template(field.default_value, {"message": message})
+
+			val = frappe.render_template(
+				field.default_value, {"message": {"message_url": message_url, **message.as_dict()}}
+			)
 
 			if val:
 				defaults[field.fieldname] = val
@@ -68,3 +90,9 @@ def execute_action(action_id: str, message_id: str, values: dict):
 			return function_name(**values)
 		else:
 			frappe.throw(_("Function {0} not found").format(action.custom_function_path))
+
+	if action.action == "Server Script":
+		script = frappe.get_doc("Server Script", action.server_script)
+		if script.disabled:
+			frappe.throw(_("Server Script {0} is disabled").format(action.server_script))
+		script.execute_method()

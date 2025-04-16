@@ -5,6 +5,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from raven.utils import delete_channel_members_cache
+
 
 class RavenChannel(Document):
 	# begin: auto-generated types
@@ -15,11 +17,14 @@ class RavenChannel(Document):
 	if TYPE_CHECKING:
 		from frappe.types import DF
 
+		from raven.raven.doctype.raven_pinned_messages.raven_pinned_messages import RavenPinnedMessages
+
 		channel_description: DF.SmallText | None
 		channel_name: DF.Data
 		is_ai_thread: DF.Check
 		is_archived: DF.Check
 		is_direct_message: DF.Check
+		is_dm_thread: DF.Check
 		is_self_message: DF.Check
 		is_synced: DF.Check
 		is_thread: DF.Check
@@ -28,30 +33,38 @@ class RavenChannel(Document):
 		linked_doctype: DF.Link | None
 		linked_document: DF.DynamicLink | None
 		openai_thread_id: DF.Data | None
+		pinned_messages: DF.Table[RavenPinnedMessages]
+		pinned_messages_string: DF.SmallText | None
 		thread_bot: DF.Link | None
 		type: DF.Literal["Private", "Public", "Open"]
+		workspace: DF.Link | None
 	# end: auto-generated types
 
 	def on_trash(self):
-		# Channel can only be deleted by the current channel admin
-		if frappe.db.exists(
-			"Raven Channel Member",
-			{"channel_id": self.name, "user_id": frappe.session.user, "is_admin": 1},
-		):
-			pass
-		elif frappe.session.user == "Administrator":
-			pass
-		else:
-			frappe.throw(_("You don't have permission to delete this channel."), frappe.PermissionError)
-
 		# delete all members when channel is deleted
 		frappe.db.delete("Raven Channel Member", {"channel_id": self.name})
 
 		# delete all messages when channel is deleted
 		frappe.db.delete("Raven Message", {"channel_id": self.name})
 
+		# delete all reactions when channel is deleted
+		frappe.db.delete("Raven Message Reaction", {"channel_id": self.name})
+
 		# Delete the pinned channels
 		frappe.db.delete("Raven Pinned Channels", {"channel_id": self.name})
+
+		delete_channel_members_cache(self.name)
+
+		if not self.is_thread:
+			# Update the channel list for all users
+			frappe.publish_realtime(
+				"channel_list_updated",
+				{
+					"channel_id": self.name,
+				},
+				room="all",
+				after_commit=True,
+			)
 
 		# If the channel was a thread, (i.e. a message exists with the same name), remove the 'is_thread' flag from the message
 		if self.is_thread and frappe.db.exists("Raven Message", {"name": self.name}):
@@ -72,6 +85,18 @@ class RavenChannel(Document):
 				docname=message_channel_id,
 			)
 
+	def on_update(self):
+		if not self.is_thread:
+			# Update the channel list for all users
+			frappe.publish_realtime(
+				"channel_list_updated",
+				{
+					"channel_id": self.name,
+				},
+				room="all",
+				after_commit=True,
+			)
+
 	def after_insert(self):
 		"""
 		After inserting a channel, we need to check if it is a direct message channel or not.
@@ -84,7 +109,18 @@ class RavenChannel(Document):
 		If it is created by a bot, we will add the bot as a member.
 		"""
 		# add current user as channel member
-		if not frappe.flags.in_test and not frappe.flags.in_install:
+		if not frappe.flags.in_install and not self.flags.do_not_add_member:
+
+			if self.type in ("Open", "Public") and not self.is_thread:
+				# Update the channel list for all users
+				frappe.publish_realtime(
+					"channel_list_updated",
+					{
+						"channel_id": self.name,
+					},
+					room="all",
+					after_commit=True,
+				)
 
 			if self.is_direct_message == 1:
 				# Add both users as members
@@ -92,6 +128,7 @@ class RavenChannel(Document):
 				unique_raven_users = list(set(raven_users))
 				self.add_members(unique_raven_users)
 			else:
+				# Can ignore permissions here because the user who creates the channel should be an admin of the channel
 				frappe.get_doc(
 					{
 						"doctype": "Raven Channel Member",
@@ -99,7 +136,7 @@ class RavenChannel(Document):
 						"user_id": frappe.session.user,
 						"is_admin": 1,
 					}
-				).insert()
+				).insert(ignore_permissions=True)
 
 	def validate(self):
 		# If the user trying to modify the channel is not the owner or channel member, then don't allow
@@ -112,6 +149,11 @@ class RavenChannel(Document):
 						_("You cannot change the name of a direct message channel"),
 						frappe.ValidationError,
 					)
+
+		if not self.is_dm_thread and not self.is_direct_message:
+			# If it's not a direct message channel, it needs a workspace
+			if not self.workspace:
+				frappe.throw(_("You need to specify a workspace for this channel"), frappe.ValidationError)
 
 		if old_doc and old_doc.get("is_archived") != self.is_archived:
 			if frappe.db.exists(
@@ -142,6 +184,15 @@ class RavenChannel(Document):
 				else:
 					frappe.throw(_("You don't have permission to modify this channel"), frappe.PermissionError)
 
+		# Check if this channel exists in the current workspace
+		if self.workspace and self.flags.in_insert:
+			if frappe.db.exists(
+				"Raven Channel", {"channel_name": self.channel_name, "workspace": self.workspace}
+			):
+				frappe.throw(
+					_("A channel with this name already exists in this workspace."), frappe.ValidationError
+				)
+
 	def before_validate(self):
 		if self.is_self_message == 1:
 			self.is_direct_message = 1
@@ -151,13 +202,22 @@ class RavenChannel(Document):
 		if self.is_direct_message == 0:
 			self.channel_name = self.channel_name.strip().lower().replace(" ", "-")
 
+		if not self.is_direct_message and not self.workspace and not self.is_dm_thread:
+			workspaces = frappe.get_all("Raven Workspace")
+			if len(workspaces) == 1:
+				self.workspace = workspaces[0].name
+
+		self.set_pinned_messages_string()
+
+	def set_pinned_messages_string(self):
+		self.pinned_messages_string = "\n".join([message.message_id for message in self.pinned_messages])
+
 	def add_members(self, members, is_admin=0):
 		# members is a list of Raven User IDs
 		for member in members:
-			doc = frappe.db.get_value(
+			doc = frappe.db.exists(
 				"Raven Channel Member",
-				filters={"channel_id": self.name, "user_id": member},
-				fieldname="name",
+				{"channel_id": self.name, "user_id": member},
 			)
 			if doc:
 				continue
@@ -173,5 +233,8 @@ class RavenChannel(Document):
 				channel_member.insert(ignore_permissions=True)
 
 	def autoname(self):
-		if self.is_direct_message == 0:
-			self.name = self.channel_name.strip().lower().replace(" ", "-")
+		if self.is_direct_message == 0 and self.is_thread == 0:
+			# Add workspace name to the channel name
+			self.name = self.workspace + "-" + self.channel_name.strip().lower().replace(" ", "-")
+		elif self.is_thread:
+			self.name = self.channel_name

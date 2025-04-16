@@ -1,7 +1,8 @@
+import { RavenPinnedMessages } from '../Raven/RavenPinnedMessages'
 
 export interface RavenChannel{
-	name: string
 	creation: string
+	name: string
 	modified: string
 	owner: string
 	modified_by: string
@@ -22,10 +23,14 @@ export interface RavenChannel{
 	linked_doctype?: string
 	/**	Linked Document : Dynamic Link	*/
 	linked_document?: string
+	/**	Workspace : Link - Raven Workspace	*/
+	workspace?: string
 	/**	Is Direct Message : Check	*/
 	is_direct_message?: 0 | 1
 	/**	Is Thread : Check	*/
 	is_thread?: 0 | 1
+	/**	Is DM Thread : Check	*/
+	is_dm_thread?: 0 | 1
 	/**	Is Self Message : Check	*/
 	is_self_message?: 0 | 1
 	/**	Is Archived : Check	*/
@@ -34,6 +39,10 @@ export interface RavenChannel{
 	last_message_timestamp?: string
 	/**	Last Message Details : JSON	*/
 	last_message_details?: any
+	/**	Pinned Messages : Table - Raven Pinned Messages	*/
+	pinned_messages?: RavenPinnedMessages[]
+	/**	Pinned Messages String : Small Text	*/
+	pinned_messages_string?: string
 	/**	Is AI Thread : Check	*/
 	is_ai_thread?: 0 | 1
 	/**	OpenAI Thread ID : Data	*/

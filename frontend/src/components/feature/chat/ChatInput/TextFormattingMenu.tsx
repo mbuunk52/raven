@@ -3,8 +3,9 @@ import { BiBold, BiCodeAlt, BiCodeBlock, BiHighlight, BiItalic, BiListOl, BiList
 import { DEFAULT_BUTTON_STYLE, ICON_PROPS } from './ToolPanel'
 import { Box, Flex, IconButton, Separator, Tooltip } from '@radix-ui/themes'
 import { getKeyboardMetaKeyString } from '@/utils/layout/keyboardKey'
+import { memo } from 'react'
 
-export const TextFormattingMenu = () => {
+export const TextFormattingMenu = memo(() => {
 
     const { editor } = useCurrentEditor()
 
@@ -14,7 +15,7 @@ export const TextFormattingMenu = () => {
         return <Box></Box>
     }
     return (
-        <Flex gap='2' align='center' px='1' py='1' className='max-w-[60%] overflow-x-auto'>
+        <Flex gap='2' align='center' px='1' py='1' className='sm:max-w-[60%] max-w-[100%] overflow-x-auto'>
             <Flex gap='3' align='center'>
                 <Tooltip content={getKeyboardMetaKeyString() + ' + B'} aria-label={getKeyboardMetaKeyString() + ' + B'}>
                     <IconButton
@@ -217,7 +218,7 @@ export const TextFormattingMenu = () => {
             <TimestampButton />
         </Flex>
     )
-}
+})
 
 const TimestampButton = () => {
     const { editor } = useCurrentEditor()

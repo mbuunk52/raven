@@ -4,15 +4,20 @@ import datetime
 import json
 
 import frappe
+from bs4 import BeautifulSoup
 from frappe import _
-from frappe.core.utils import html2text
 from frappe.model.document import Document
 from frappe.utils import get_datetime, get_system_timezone
 from pytz import timezone, utc
 
 from raven.ai.ai import handle_ai_thread_message, handle_bot_dm
-from raven.notification import send_notification_to_topic, send_notification_to_user
-from raven.utils import track_channel_visit
+from raven.api.raven_channel import get_peer_user
+from raven.notification import (
+	send_notification_for_message,
+	send_notification_to_topic,
+	send_notification_to_user,
+)
+from raven.utils import refresh_thread_reply_count, track_channel_visit
 
 
 class RavenMessage(Document):
@@ -46,6 +51,7 @@ class RavenMessage(Document):
 		mentions: DF.Table[RavenMention]
 		message_reactions: DF.JSON | None
 		message_type: DF.Literal["Text", "Image", "File", "Poll", "System"]
+		notification: DF.Data | None
 		poll_id: DF.Link | None
 		replied_message_details: DF.JSON | None
 		text: DF.LongText | None
@@ -54,17 +60,6 @@ class RavenMessage(Document):
 	# end: auto-generated types
 
 	def before_validate(self):
-		try:
-			if self.text and not self.message_type == "System":
-				content = html2text(self.text)
-				# Remove trailing new line characters and white spaces
-				self.content = content.rstrip()
-		except Exception:
-			pass
-
-		if self.message_type in ["File", "Image"] and self.file:
-			# Store the file name in the content field
-			self.content = self.file.split("/")[-1]
 
 		if not self.is_new() and not self.flags.is_ai_streaming:
 			# this is not a new message, so it's a previous message being edited
@@ -72,7 +67,73 @@ class RavenMessage(Document):
 			if old_doc.text != self.text:
 				self.is_edited = True
 
-		self.process_mentions()
+		self.parse_html_content()
+
+	def parse_html_content(self):
+		"""
+		Parse the HTML content to do the following:
+		1. Extract all user mentions
+		2. Remove empty trailing paragraphs
+		3. Extract the text content
+		4. TODO: Extract all links
+		"""
+		if not self.text:
+			return
+		if self.message_type == "System":
+			return
+
+		soup = BeautifulSoup(self.text, "html.parser")
+		self.remove_empty_trailing_paragraphs(soup)
+		self.extract_mentions(soup)
+
+		text_content = soup.get_text(" ", strip=True)
+
+		if not text_content:
+			# Check if the content has a GIF
+			for img in soup.find_all("img"):
+				if "media.tenor.com" in img.get("src"):
+					text_content = "Sent a GIF"
+					break
+
+		self.content = text_content
+
+		if not self.content and self.link_doctype and self.link_document:
+			self.content = f"{self.link_doctype} - {self.link_document}"
+
+	def extract_mentions(self, soup):
+		"""
+		Extract all user mentions from the HTML content
+		"""
+		self.mentions = []
+		unique_mentions = set()
+		for d in soup.find_all("span", attrs={"data-type": "userMention"}):
+			mention_id = d.get("data-id")
+			if mention_id and mention_id not in unique_mentions:
+				self.append("mentions", {"user": mention_id})
+
+				frappe.publish_realtime(
+					"raven_mention",
+					{
+						"channel_id": self.channel_id,
+						"user_id": mention_id,
+					},
+					user=mention_id,
+					after_commit=True,
+				)
+				unique_mentions.add(mention_id)
+
+	def remove_empty_trailing_paragraphs(self, soup):
+		"""
+		Remove p, br tags that are at the end with no content
+		"""
+		all_tags = soup.find_all(True)
+		all_tags.reverse()
+		for tag in all_tags:
+			if tag.name in ["br", "p"] and not tag.contents:
+				tag.extract()
+			else:
+				break
+		self.text = str(soup)
 
 	def validate(self):
 		"""
@@ -123,10 +184,13 @@ class RavenMessage(Document):
 
 	def after_insert(self):
 		if self.message_type != "System":
-			self.publish_unread_count_event()
+			last_message_details = self.set_last_message_timestamp()
+			self.publish_unread_count_event(last_message_details)
 
 		if self.message_type == "Text":
 			self.handle_ai_message()
+
+		self.send_push_notification()
 
 	def handle_ai_message(self):
 
@@ -167,17 +231,13 @@ class RavenMessage(Document):
 			return
 
 		# Get the bot user
-		peer_user = frappe.db.get_value(
-			"Raven Channel Member",
-			{"channel_id": self.channel_id, "user_id": ("!=", self.owner)},
-			"user_id",
-		)
+		peer_user = get_peer_user(self.channel_id, is_dm)
 
-		if not peer_user:
+		if not peer_user or peer_user.get("type") != "Bot":
 			return
 
 		# Get the bot user doc
-		peer_user_doc = frappe.get_cached_doc("Raven User", peer_user)
+		peer_user_doc = frappe.get_cached_doc("Raven User", peer_user.get("user_id"))
 
 		if peer_user_doc.type != "Bot" or not peer_user_doc.bot:
 			return
@@ -196,25 +256,32 @@ class RavenMessage(Document):
 			at_front=True,
 		)
 
-	def publish_unread_count_event(self):
-		frappe.db.set_value(
-			"Raven Channel",
-			self.channel_id,
+	def set_last_message_timestamp(self):
+
+		# Update directly via SQL since we do not want to invalidate the document cache
+		message_details = json.dumps(
 			{
-				"last_message_timestamp": self.creation,
-				"last_message_details": json.dumps(
-					{
-						"message_id": self.name,
-						"content": self.content if self.message_type == "Text" else self.file,
-						"message_type": self.message_type,
-						"owner": self.owner,
-						"is_bot_message": self.is_bot_message,
-						"bot": self.bot,
-					}
-				),
-			},
-			update_modified=False,
+				"message_id": self.name,
+				"content": self.content,
+				"message_type": self.message_type,
+				"owner": self.owner,
+				"is_bot_message": self.is_bot_message,
+				"bot": self.bot,
+			}
 		)
+
+		raven_channel = frappe.qb.DocType("Raven Channel")
+		query = (
+			frappe.qb.update(raven_channel)
+			.where(raven_channel.name == self.channel_id)
+			.set(raven_channel.last_message_timestamp, self.creation)
+			.set(raven_channel.last_message_details, message_details)
+		)
+		query.run()
+
+		return message_details
+
+	def publish_unread_count_event(self, last_message_details=None):
 
 		channel_doc = frappe.get_cached_doc("Raven Channel", self.channel_id)
 		# If the message is a direct message, then we can only send it to one user
@@ -222,15 +289,9 @@ class RavenMessage(Document):
 
 			if not channel_doc.is_self_message:
 
-				peer_raven_user = frappe.db.get_value(
-					"Raven Channel Member",
-					{"channel_id": self.channel_id, "user_id": ("!=", frappe.session.user)},
-					"user_id",
-				)
+				peer_user_doc = get_peer_user(self.channel_id, 1)
 
-				peer_user_doc = frappe.get_cached_doc("Raven User", peer_raven_user)
-
-				if peer_user_doc.type == "User":
+				if peer_user_doc.get("type") == "User":
 
 					frappe.publish_realtime(
 						"raven:unread_channel_count_updated",
@@ -238,6 +299,9 @@ class RavenMessage(Document):
 							"channel_id": self.channel_id,
 							"play_sound": True,
 							"sent_by": self.owner,
+							"is_dm_channel": True,
+							"last_message_timestamp": self.creation,
+							"last_message_details": last_message_details,
 						},
 						user=peer_user_doc.user,
 						after_commit=True,
@@ -249,21 +313,29 @@ class RavenMessage(Document):
 				{
 					"channel_id": self.channel_id,
 					"play_sound": False,
+					"is_dm_channel": True,
 					"sent_by": self.owner,
+					"last_message_timestamp": self.creation,
+					"last_message_details": last_message_details,
 				},
 				user=self.owner,
 				after_commit=True,
 			)
 		elif channel_doc.is_thread:
+			# TODO: Might be a good idea to just send this to the users who are participants in the thread - maybe not a lot of users?
+
+			# Get the number of replies in the thread
+			reply_count = refresh_thread_reply_count(self.channel_id)
 			frappe.publish_realtime(
-				"thread_reply_created",
+				"thread_reply",
 				{
 					"channel_id": self.channel_id,
 					"sent_by": self.owner,
+					"last_message_timestamp": self.creation,
+					"number_of_replies": reply_count,
 				},
 				after_commit=True,
-				doctype="Raven Message",
-				docname=self.channel_id,
+				room="all",
 			)
 		else:
 			# This event needs to be published to all users on Raven (desk + website)
@@ -273,28 +345,13 @@ class RavenMessage(Document):
 					"channel_id": self.channel_id,
 					"play_sound": False,
 					"sent_by": self.owner,
+					"is_dm_channel": False,
 					"is_thread": channel_doc.is_thread,
+					"last_message_timestamp": self.creation,
 				},
 				after_commit=True,
-				room="website",
+				room="all",
 			)
-
-	def process_mentions(self):
-		if not self.json:
-			return
-
-		try:
-			content = self.json.get("content", [{}])[0].get("content", [])
-		except (IndexError, AttributeError):
-			return
-
-		entered_ids = set()
-		for item in content:
-			if item.get("type") == "userMention":
-				user_id = item.get("attrs", {}).get("id")
-				if user_id and user_id not in entered_ids:
-					self.append("mentions", {"user": user_id})
-					entered_ids.add(user_id)
 
 	def send_push_notification(self):
 		# TODO: Send Push Notification for the following:
@@ -306,34 +363,23 @@ class RavenMessage(Document):
 		if self.message_type == "System":
 			return
 
-		channel_doc = frappe.get_cached_doc("Raven Channel", self.channel_id)
-
-		if channel_doc.is_direct_message:
-			if not channel_doc.is_self_message:
-				# The message was sent on a direct message channel
-				self.send_notification_for_direct_message()
+		if frappe.request and hasattr(frappe.request, "after_response"):
+			frappe.request.after_response.add(lambda: send_notification_for_message(self))
 		else:
-			# The message was sent on a channel
-			self.send_notification_for_channel_message()
-			# channel_type = frappe.get_cached_value("Raven Channel", self.channel_id, "channel_type")
+			send_notification_for_message(self)
 
 	def get_notification_message_content(self):
 		"""
 		Gets the content of the message for the push notification
 		"""
 		if self.message_type == "File":
-			file_name = self.file.split("/")[-1]
-			return f"📄 Sent a file - {file_name}"
+			return f"📄 Sent a file - {self.content}"
 		elif self.message_type == "Image":
 			return "📷 Sent a photo"
 		elif self.message_type == "Poll":
 			return "📊 Sent a poll"
 		elif self.text:
-			# Check if the message is a GIF
-			if "<img src=https://media.tenor.com" in self.text:
-				return "Sent a GIF"
-			else:
-				return self.text
+			return self.content
 
 	def get_message_owner_name(self):
 		"""
@@ -413,6 +459,7 @@ class RavenMessage(Document):
 				"content": self.content if self.message_type == "Text" else self.file,
 				"from_user": self.owner,
 				"type": "New message",
+				"is_thread": "1" if is_thread else "0",
 				"creation": get_milliseconds_since_epoch(self.creation),
 			},
 		)
@@ -454,7 +501,7 @@ class RavenMessage(Document):
 
 		# delete poll if the message is of type poll after deleting the message
 		if self.message_type == "Poll":
-			frappe.delete_doc("Raven Poll", self.poll_id)
+			frappe.delete_doc("Raven Poll", self.poll_id, ignore_permissions=True, delete_permanently=True)
 
 		# TEMP: this is a temp fix for the Desk interface
 		self.publish_deprecated_event_for_desk()
@@ -565,11 +612,11 @@ class RavenMessage(Document):
 				docname=self.channel_id,
 				after_commit=after_commit,
 			)
-			# track the visit of the user to the channel if a new message is created
-			track_channel_visit(channel_id=self.channel_id, user=self.owner)
-			# frappe.enqueue(method=track_channel_visit, channel_id=self.channel_id, user=self.owner)
 
-			self.send_push_notification()
+			if self.message_type != "System" and not self.is_bot_message:
+				# track the visit of the user to the channel if a new message is created
+				track_channel_visit(channel_id=self.channel_id, user=self.owner)
+				# frappe.enqueue(method=track_channel_visit, channel_id=self.channel_id, user=self.owner)
 
 			# If this is a new messagge (only applicable for files in on_update), then handle the AI message
 			if self.message_type == "File" or self.message_type == "Image":
@@ -581,9 +628,24 @@ class RavenMessage(Document):
 		frappe.db.delete("Raven Message Reaction", {"message": self.name})
 		# if the message is a thread, delete all messages in the thread and the thread channel
 		if self.is_thread:
-			frappe.db.delete("Raven Message", {"channel_id": self.name})
-			# delete the channel for the thread
-			frappe.db.delete("Raven Channel", self.name)
+			# Delete the thread channel - this will automatically delete all the messages and their reactions in the thread
+			thread_channel_doc = frappe.get_doc("Raven Channel", self.name)
+			thread_channel_doc.delete(ignore_permissions=True)
+
+		# delete the pinned message
+		is_pinned = frappe.get_all(
+			"Raven Pinned Messages", {"message_id": self.name, "parent": self.channel_id}
+		)
+		if is_pinned:
+			channel_doc = frappe.get_doc("Raven Channel", self.channel_id)
+			pinned_row = None
+			for pinned_message in channel_doc.pinned_messages:
+				if pinned_message.message_id == self.name:
+					pinned_row = pinned_message
+					break
+			if pinned_row:
+				channel_doc.remove(pinned_row)
+				channel_doc.save()
 
 
 def on_doctype_update():

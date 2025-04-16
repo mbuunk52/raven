@@ -43,10 +43,12 @@ const AttachFileToDocumentModal = ({ onClose, message }: AttachFileToDocumentMod
         if ((message as FileMessage).file) {
             addRecentlyUsedDocType(data.doctype)
             setLoading(true)
+            // The file URL might include the File ID, so we need to remove that
+            const fileURL = (message as FileMessage).file.split('?')[0]
             call.get('frappe.client.get_value', {
                 doctype: 'File',
                 filters: {
-                    file_url: (message as FileMessage).file,
+                    file_url: fileURL,
                     attached_to_doctype: "Raven Message",
                     attached_to_name: message.name,
                     attached_to_field: "file"
@@ -148,7 +150,7 @@ const AttachFileToDocumentModal = ({ onClose, message }: AttachFileToDocumentMod
                         <Button variant="soft" color="gray">Cancel</Button>
                     </Dialog.Close>
                     <Button type='submit' disabled={loading}>
-                        {loading && <Loader />}
+                        {loading && <Loader className="text-white" />}
                         Attach
                     </Button>
                 </Flex>

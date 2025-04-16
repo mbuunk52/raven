@@ -1,4 +1,5 @@
 import frappe
+import openai
 
 from raven.ai.handler import get_variables_for_instructions
 
@@ -8,6 +9,8 @@ def get_instruction_preview(instruction):
 	"""
 	Function to get the rendered instructions for the bot
 	"""
+	frappe.has_permission(doctype="Raven Bot", ptype="write", throw=True)
+
 	instructions = frappe.render_template(instruction, get_variables_for_instructions())
 	return instructions
 
@@ -27,3 +30,12 @@ def get_saved_prompts(bot: str = None):
 	prompts = sorted(prompts, key=lambda x: x.get("raven_bot") == bot, reverse=True)
 
 	return prompts
+
+
+@frappe.whitelist()
+def get_open_ai_version():
+	"""
+	API to get the version of the OpenAI Python client
+	"""
+	frappe.has_permission(doctype="Raven Bot", ptype="read", throw=True)
+	return openai.__version__

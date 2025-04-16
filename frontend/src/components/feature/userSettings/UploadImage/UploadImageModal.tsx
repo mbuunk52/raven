@@ -9,11 +9,15 @@ import { FileUploadBox } from "./FileUploadBox"
 import { __ } from "@/utils/translations"
 
 interface UploadImageModalProps {
-    onClose: () => void,
-    uploadImage: (file: string) => void
+    uploadImage: (file: string) => void,
+    label?: string,
+    doctype: string,
+    docname: string,
+    fieldname: string,
+    isPrivate?: boolean,
 }
 
-export const UploadImageModal = ({ onClose, uploadImage }: UploadImageModalProps) => {
+export const UploadImageModal = ({ uploadImage, label = 'Upload Image', doctype, docname, fieldname, isPrivate = true }: UploadImageModalProps) => {
 
     const [file, setFile] = useState<CustomFile | undefined>()
     const [fileError, setFileError] = useState<FrappeError>()
@@ -24,18 +28,18 @@ export const UploadImageModal = ({ onClose, uploadImage }: UploadImageModalProps
         setFile(newFile)
     }
 
-    const userData = useUserData()
-
     const uploadFiles = async () => {
         if (file) {
             return upload(file, {
-                doctype: 'Raven User',
-                docname: userData.name,
-                fieldname: 'user_image',
-                isPrivate: true,
+                doctype: doctype,
+                docname: docname,
+                fieldname: fieldname,
+                otherData: {
+                    optimize: '1',
+                },
+                isPrivate: isPrivate,
             }).then((res) => {
                 uploadImage(res.file_url)
-                onClose()
             }).catch((e) => {
                 setFileError(e)
             })
@@ -44,7 +48,7 @@ export const UploadImageModal = ({ onClose, uploadImage }: UploadImageModalProps
 
     return (
         <>
-            <Dialog.Title>{__("Upload file")}</Dialog.Title>
+            <Dialog.Title>{label}</Dialog.Title>
 
             <ErrorBanner error={fileError} />
 
@@ -61,7 +65,7 @@ export const UploadImageModal = ({ onClose, uploadImage }: UploadImageModalProps
                 </Dialog.Close>
                 <Button type='button' onClick={uploadFiles} disabled={loading}>
                     {loading && <Loader />}
-                    {loading ? __("Saving") : __("Save")}
+                    {loading ? __("Uploading") : __("Upload")}
                 </Button>
             </Flex>
         </>
